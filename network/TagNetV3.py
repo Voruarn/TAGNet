@@ -34,8 +34,8 @@ class DinoV3ConvNext(nn.Module):
         self.convnext = eval(model_name)(pretrained=pretrained)
         
         # 冻结ConvNext所有参数（仅训练depth_adapter）
-        for param in self.convnext.parameters():
-            param.requires_grad = False
+        # for param in self.convnext.parameters():
+        #     param.requires_grad = False
         
         # 深度图适配层：单通道→3通道（匹配ConvNext输入），可训练
         self.depth_adapter = nn.Conv2d(1, 3, kernel_size=1, stride=1, padding=0)
@@ -337,7 +337,7 @@ class TagNet(nn.Module):
         self.text_encoder = CLIPTextEncoder()
         
         # 动态获取维度配置（适配不同ConvNext型号）
-        embed_dims = self.feat_extractor.cur_embed_dims  # [c1, c2, c3, c4]
+        embed_dims = self.visual_encoder.cur_embed_dims  # [c1, c2, c3, c4]
         visual_c4_dim = embed_dims[-1]  # c4维度（视觉高层特征）
         text_dim = self.text_encoder.output_dim  # CLIP文本维度（768）
         
