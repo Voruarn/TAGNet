@@ -135,10 +135,6 @@ class CrossModalFusion(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-        # 损失函数（复用但明确物理意义）
-        self.semantic_pixel_loss = nn.MSELoss()  # 语义-像素匹配损失
-        self.depth_semantic_loss = nn.L1Loss()   # 深度-语义一致性损失
-
     def forward(self, visual_feats, text_feat):
         """
         Args:
@@ -171,15 +167,8 @@ class CrossModalFusion(nn.Module):
         gate_input = torch.cat([rgb_text_feat, depth_text_feat], dim=1)  # (B, 2C, H, W)
         gate_weight = self.gate(gate_input)  # (B, C, H, W)
         fused_feat = gate_weight * rgb_text_feat + (1 - gate_weight) * depth_text_feat
-        
-        # 6. 计算融合损失
-        losses = {
-            # 语义-像素损失：RGB与深度特征的一致性（间接关联文本语义）
-            "pixel_loss": self.semantic_pixel_loss(rgb_c4, depth_c4),
-            # 深度-语义损失：深度特征与RGB特征的差异约束（基于文本深度描述）
-            "depth_loss": self.depth_semantic_loss(depth_c4, rgb_c4.detach())
-        }
-        return fused_feat, losses
+       
+        return fused_feat
 
 
 class MultiScaleOptimizer(nn.Module):
@@ -390,7 +379,7 @@ class TagNet(nn.Module):
         text_feats = text_feats.float()  # 添加这一行
         
         # 3. 跨模态融合（c4特征 + 文本特征）
-        fused_c4, fusion_losses = self.cross_modal_fusion(visual_feats, text_feats)
+        fused_c4 = self.cross_modal_fusion(visual_feats, text_feats)
         
         # 4. 多尺度特征优化（c2+c3+fused_c4）
         optimized_feat = self.multi_scale_opt(fused_c4, visual_feats)  # (B, 256, H2, W2)
@@ -417,139 +406,14 @@ class TagNet(nn.Module):
             # 6.3 总损失（权重平衡各任务）
             total_loss = (
                 base_loss + 
-                0.3 * semantic_loss +  # 语义引导权重
-                0.2 * fusion_losses['pixel_loss'] +  # 像素一致性权重
-                0.2 * fusion_losses['depth_loss']    # 深度一致性权重
+                0.5 * semantic_loss  # 语义引导权重
             )
             
             # 整理损失字典
             outputs['losses'] = {
                 'base_loss': base_loss,
                 'semantic_loss': semantic_loss,
-                'pixel_loss': fusion_losses['pixel_loss'],
-                'depth_loss': fusion_losses['depth_loss'],
                 'total_loss': total_loss
             }
         
         return outputs
-
-
-# ------------------------------ 训练/测试示例（修正逻辑错误）------------------------------
-def train_step(model, dataloader, optimizer, epoch):
-    """单轮训练（模拟真实训练流程）"""
-    model.train()
-    total_loss = 0.0
-    
-    for batch_idx, (rgb, depth, texts, gt) in enumerate(dataloader):
-        # 数据设备迁移
-        rgb = rgb.to(device)
-        depth = depth.to(device)
-        gt = gt.to(device)
-        
-        # 前向传播
-        outputs = model(rgb, depth, texts, gt)
-        loss = outputs['losses']['total_loss']
-        
-        # 反向传播
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪防爆炸
-        optimizer.step()
-        
-        # 损失统计
-        total_loss += loss.item() * rgb.size(0)
-        if (batch_idx + 1) % 10 == 0:
-            print(f"Epoch [{epoch+1}], Batch [{batch_idx+1}/{len(dataloader)}], Loss: {loss.item():.4f}")
-    
-    avg_loss = total_loss / len(dataloader.dataset)
-    print(f"Epoch [{epoch+1}] Average Train Loss: {avg_loss:.4f}")
-    return avg_loss
-
-
-def test_step(model, dataloader):
-    """测试推理（无梯度计算）"""
-    model.eval()
-    sal_maps = []
-    texts_used = []
-    
-    with torch.no_grad():
-        for rgb, depth, texts in dataloader:
-            rgb = rgb.to(device)
-            depth = depth.to(device)
-            
-            # 推理
-            outputs = model(rgb, depth, texts)
-            sal_maps.append(outputs['sal_map'].cpu())
-            texts_used.extend(texts)
-    
-    # 整理输出
-    sal_maps = torch.cat(sal_maps, dim=0)
-    print(f"Test Completed. Salient Maps Shape: {sal_maps.shape}, Texts Count: {len(texts_used)}")
-    return sal_maps, texts_used
-
-
-# ------------------------------ 模拟数据加载器（示例）------------------------------
-class MockRGBDDataset(torch.utils.data.Dataset):
-    """模拟RGB-D显著性数据集（含离线FastVLM文本）"""
-    def __init__(self, size=100, img_size=(224, 224)):
-        self.size = size
-        self.img_size = img_size
-        # 模拟离线FastVLM生成的显著性文本（真实场景需替换为实际生成结果）
-        self.text_pool = [
-            "A red apple in the center of the image",
-            "A blue cup on the table with shallow depth",
-            "A white book on the shelf, deeper than the background",
-            "A black pen on the desk, salient and small"
-        ]
-    
-    def __len__(self):
-        return self.size
-    
-    def __getitem__(self, idx):
-        # 模拟RGB图像（随机值，真实场景需加载数据）
-        rgb = torch.randn(3, *self.img_size)
-        # 模拟深度图（随机值，真实场景需加载数据）
-        depth = torch.randn(1, *self.img_size)
-        # 随机选择文本（真实场景需与图像一一对应）
-        text = self.text_pool[idx % len(self.text_pool)]
-        # 模拟GT（随机值，真实场景需加载标签）
-        gt = torch.rand(1, *self.img_size)
-        
-        return rgb, depth, text, gt
-
-
-if __name__ == "__main__":
-    # 1. 配置参数
-    img_size = (224, 224)
-    batch_size = 2
-    epochs = 3
-    lr = 1e-4
-    
-    # 2. 构建数据集与加载器
-    train_dataset = MockRGBDDataset(size=100, img_size=img_size)
-    test_dataset = MockRGBDDataset(size=20, img_size=img_size)
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-    
-    # 3. 初始化模型与优化器（仅优化可训练参数）
-    model = TagNet(convnext_model_name='convnext_small').to(device)
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)  # 学习率调度
-    
-    # 4. 训练与测试
-    print("="*50, "Start Training", "="*50)
-    for epoch in range(epochs):
-        train_avg_loss = train_step(model, train_loader, optimizer, epoch)
-        scheduler.step()  # 更新学习率
-    
-    print("\n" + "="*50, "Start Testing", "="*50)
-    test_sal_maps, test_texts = test_step(model, test_loader)
-    
-    # 5. 保存模型（仅保存可训练参数，减少存储）
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'epoch': epochs
-    }, 'TagNet.pth')
-    print("\nModel Saved to 'fastvlm_dinov3_clip_sod.pth'")
