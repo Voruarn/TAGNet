@@ -316,8 +316,8 @@ class SalientPredictor(nn.Module):
 class TagNet(nn.Module):
     """
     TagNet: Text-Answer-Guided Network
-    最终模型：FastVLM（离线生成文本）+ DinoV3-ConvNext（特征提取）+ CLIP（文本编码）
-    仅训练：depth_adapter + 跨模态融合 + 多尺度优化 + 预测头
+    最终模型:   FastVLM（离线生成文本）+ ConvNext（视觉特征提取）+ CLIP（文本编码）
+    仅训练:     ConvNext + 跨模态融合 + 多尺度优化 + 预测头
     """
     def __init__(self, convnext_model_name='convnext_tiny'):
         super().__init__()
@@ -373,7 +373,7 @@ class TagNet(nn.Module):
         visual_feats = self.visual_encoder(rgb, depth)
         
         # 2. 文本编码（CLIP，无梯度）
-        text_feats = self.text_encoder(texts)  # (B, 768)
+        text_feats = self.text_encoder(texts)  # (B, 512)
         
         # 关键修改：将文本特征从 Half 转为 Float，与线性层权重 dtype 一致 
         text_feats = text_feats.float()  # 添加这一行
