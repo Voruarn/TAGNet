@@ -4,7 +4,7 @@ from PIL import Image
 import numpy as np
 import os, argparse
 import imageio
-from network.TagNet import TagNet
+from network.TAGNet import TAGNet
 from setting.VLdataLoader import test_dataset
 from tqdm import tqdm
 import time
@@ -16,8 +16,8 @@ parser.add_argument("--test_path", type=str,
         default='../Datasets/RGB-DSOD/RGB-DSOD/', 
         help='Name of dataset')
 parser.add_argument('--testsize', type=int, default=256, help='testing size')
-parser.add_argument("--model", type=str, default='TagNet',
-        help='model name:[TagNet]')
+parser.add_argument("--model", type=str, default='TAGNet',
+        help='model name:[TAGNet]')
 parser.add_argument('--convnext_model', type=str, default='convnext_base', 
                     help='ConvNext backbone: [convnext_base]')
 parser.add_argument("--smap_save", type=str, default='../Sal_Preds/', help='save_path name')
@@ -80,5 +80,3 @@ for dataset in test_datasets:
     print('Mean running time is: ', np.mean(cost_time))
     print("FPS is: ", test_loader.size / np.sum(cost_time))
 print("Test Done!")
-
-
