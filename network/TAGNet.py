@@ -6,18 +6,14 @@ from transformers import AutoModel, AutoProcessor
 import clip
 from PIL import Image
 import numpy as np
-# 假设convnext.py中定义了convnext_tiny/small/base，且返回各层特征列表（[c1, c2, c3, c4]）
 from network.convnext import convnext_tiny, convnext_small, convnext_base
 
 # 设备配置
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class DinoV3ConvNext(nn.Module):
-    """
-    DinoV3预训练ConvNext特征提取器（支持多型号）
-    输出：RGB和深度的c2/c3/c4特征（对应ConvNext的第2/3/4阶段输出）
-    """
+class ConvNextModel(nn.Module):
+
     # 不同ConvNext型号的各阶段输出维度（与convnext.py中模型输出一致）
     embed_dims = {
         "convnext_tiny": [96, 192, 384, 768],    # c1, c2, c3, c4
@@ -30,12 +26,7 @@ class DinoV3ConvNext(nn.Module):
         self.model_name = model_name
         self.cur_embed_dims = self.embed_dims[model_name]  # 当前模型的维度配置
         
-        # 加载DinoV3预训练ConvNext（确保convnext.py中模型forward返回[c1,c2,c3,c4]）
         self.convnext = eval(model_name)(pretrained=pretrained)
-        
-        # 冻结ConvNext所有参数（仅训练depth_adapter）
-        # for param in self.convnext.parameters():
-        #     param.requires_grad = False
         
         # 深度图适配层：单通道→3通道（匹配ConvNext输入），可训练
         self.depth_adapter = nn.Conv2d(1, 3, kernel_size=1, stride=1, padding=0)
@@ -70,7 +61,7 @@ class DinoV3ConvNext(nn.Module):
 class CLIPTextEncoder(nn.Module):
     """
     CLIP文本编码器（ViT-B/16）- 冻结参数
-    输出：768维归一化文本特征
+    输出： 512 维归一化文本特征
     """
     def __init__(self):
         super().__init__()
@@ -88,7 +79,7 @@ class CLIPTextEncoder(nn.Module):
         Args:
             texts: list[str] - 显著性文本列表（长度=batch_size）
         Returns:
-            text_feats: (B, 768) - 归一化文本特征
+            text_feats: (B, 512) - 归一化文本特征
         """
         # CLIP Tokenize（自动处理padding和截断）
         text_tokens = clip.tokenize(texts, truncate=True).to(device)
@@ -109,8 +100,8 @@ class CrossModalFusion(nn.Module):
     """
     def __init__(self, visual_dim, text_dim):
         super().__init__()
-        self.visual_dim = visual_dim  # 视觉特征维度（如convnext_small的c4=768）
-        self.text_dim = text_dim      # 文本特征维度（CLIP=768）
+        self.visual_dim = visual_dim  # 视觉特征维度
+        self.text_dim = text_dim      # 文本特征维度
         
         # 1. 文本特征→视觉特征维度映射（768→768/1024）
         self.text_proj = nn.Linear(text_dim, visual_dim)
@@ -246,11 +237,9 @@ class MultiScaleOptimizer(nn.Module):
         # 3. 跨尺度注意力融合（以fused_c4为查询，c3/c2为键值）
         B, C, H, W = fused_c4_up.shape
         # 展平空间维度（适配多头注意力输入）
-        q = fused_c4_up.flatten(2).permute(0, 2, 1)  # (B, H*W, 256) - 查询（语义主导）
-        k = torch.cat([rgb_c3_up, depth_c3_up], dim=1).flatten(2).permute(0, 2, 1)  # (B, H*W, 512)→(B, H*W, 256)（降维）
-        k = k[:, :, :C]  # 确保键维度与查询一致
-        v = torch.cat([rgb_c2, depth_c2], dim=1).flatten(2).permute(0, 2, 1)  # (B, H*W, 512)→(B, H*W, 256)
-        v = v[:, :, :C]
+        q = fused_c4_up.flatten(2).permute(0, 2, 1) # (B, H*W, 256) - 查询（语义主导）
+        k = rgb_c3_up.flatten(2).permute(0, 2, 1)   # (B, H*W, 256)
+        v = rgb_c2.flatten(2).permute(0, 2, 1)      # (B, H*W, 256)
         
         attn_out, _ = self.cross_attn(q, k, v)  # (B, H*W, 256)
         attn_feat = attn_out.permute(0, 2, 1).view(B, C, H, W)  # 恢复空间维度
@@ -313,16 +302,16 @@ class SalientPredictor(nn.Module):
         return sal_map
 
 
-class TagNet(nn.Module):
+class TAGNet(nn.Module):
     """
-    TagNet: Text-Answer-Guided Network
+    TAGNet: Text-Answer-Guided Network
     最终模型:   FastVLM（离线生成文本）+ ConvNext（视觉特征提取）+ CLIP（文本编码）
     仅训练:     ConvNext + 跨模态融合 + 多尺度优化 + 预测头
     """
     def __init__(self, convnext_model_name='convnext_tiny'):
         super().__init__()
         # 1. 初始化子模块（按依赖顺序）
-        self.visual_encoder = DinoV3ConvNext(model_name=convnext_model_name)
+        self.visual_encoder = ConvNextModel(model_name=convnext_model_name)
         self.text_encoder = CLIPTextEncoder()
         
         # 动态获取维度配置（适配不同ConvNext型号）
@@ -376,7 +365,7 @@ class TagNet(nn.Module):
         text_feats = self.text_encoder(texts)  # (B, 512)
         
         # 关键修改：将文本特征从 Half 转为 Float，与线性层权重 dtype 一致 
-        text_feats = text_feats.float()  # 添加这一行
+        text_feats = text_feats.float()  
         
         # 3. 跨模态融合（c4特征 + 文本特征）
         fused_c4 = self.cross_modal_fusion(visual_feats, text_feats)
@@ -409,7 +398,6 @@ class TagNet(nn.Module):
                 0.5 * semantic_loss  # 语义引导权重
             )
             
-            # 整理损失字典
             outputs['losses'] = {
                 'base_loss': base_loss,
                 'semantic_loss': semantic_loss,
