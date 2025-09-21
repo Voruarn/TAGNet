@@ -21,7 +21,7 @@ class ConvNextModel(nn.Module):
         "convnext_base": [128, 256, 512, 1024]
     }
 
-    def __init__(self, model_name='convnext_tiny', pretrained=True):
+    def __init__(self, model_name='convnext_base', pretrained=True):
         super().__init__()
         self.model_name = model_name
         self.cur_embed_dims = self.embed_dims[model_name]  # 当前模型的维度配置
@@ -308,7 +308,7 @@ class TAGNet(nn.Module):
     最终模型:   FastVLM（离线生成文本）+ ConvNext（视觉特征提取）+ CLIP（文本编码）
     仅训练:     ConvNext + 跨模态融合 + 多尺度优化 + 预测头
     """
-    def __init__(self, convnext_model_name='convnext_tiny'):
+    def __init__(self, convnext_model_name='convnext_base'):
         super().__init__()
         # 1. 初始化子模块（按依赖顺序）
         self.visual_encoder = ConvNextModel(model_name=convnext_model_name)
