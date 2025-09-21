@@ -4,31 +4,27 @@ from PIL import Image
 import numpy as np
 import os, argparse
 import imageio
-from network.TagNetV3 import TagNet
+from network.TagNet import TagNet
 from setting.VLdataLoader import test_dataset
 from tqdm import tqdm
 import time
 import cv2
 
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 parser = argparse.ArgumentParser()
 parser.add_argument("--test_path", type=str, 
-        default='/fuyuxiang/Projects/CLS/Datasets/RGB-DSOD11/RGB-DSOD/', 
+        default='../Datasets/RGB-DSOD/RGB-DSOD/', 
         help='Name of dataset')
 parser.add_argument('--testsize', type=int, default=256, help='testing size')
 parser.add_argument("--model", type=str, default='TagNet',
         help='model name:[TagNet]')
 parser.add_argument('--convnext_model', type=str, default='convnext_base', 
-                    help='ConvNext backbone: [convnext_tiny, convnext_small, convnext_base]')
-parser.add_argument("--smap_save", type=str, default='../tagnet_preds/',
-        help='model name')
+                    help='ConvNext backbone: [convnext_base]')
+parser.add_argument("--smap_save", type=str, default='../Sal_Preds/', help='save_path name')
 parser.add_argument("--load", type=str,
-            default="/fuyuxiang/Projects/CLS/Seg/TagNet/CHKP0905_b/TagNet_base_RGBDT29K_100e.pth",
+            default="",
               help="restore from checkpoint")
-
 opt = parser.parse_args()
-
 
 def create_folder(save_path):
     import os
@@ -36,7 +32,6 @@ def create_folder(save_path):
         os.makedirs(save_path)
         print(f"Create Folder [“{save_path}”].")
     return save_path
-
 
 model = eval(opt.model)(convnext_model_name=opt.convnext_model)
 
@@ -49,17 +44,15 @@ if opt.load is not None and os.path.isfile(opt.load):
 model.cuda()
 model.eval()
 
-
 test_datasets = ['DUT-RGBD-Test', 'NJUD', 'NLPR', 'SIP', 'STERE']
-
 
 for dataset in test_datasets:
     # load data
     data_path  = opt.test_path + dataset
     img_path = os.path.join(data_path, 'test_images/')
-    depth_path = os.path.join(data_path, 'gen_depth/')
+    depth_path = os.path.join(data_path, 'test_depth/')
     mask_path = os.path.join(data_path, 'test_masks/')
-    text_path = os.path.join(data_path, 'test_text_05b/')
+    text_path = os.path.join(data_path, 'test_text/')
 
     test_loader = test_dataset(img_path, depth_path, mask_path, text_path, opt.testsize)
     method=opt.load.split('/')[-1].split('.')[0]
