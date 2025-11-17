@@ -7,9 +7,10 @@ import sys
 from tqdm import tqdm
 from setting.VLdataLoader import get_loader
 from setting.utils import clip_gradient, adjust_lr
-from network.TAGNet import TAGNet  
+from network.TAGNet import TAGNet, CLIPTextEncoder
 from metrics.SOD_metrics import SODMetrics
 from torch.utils.tensorboard import SummaryWriter
+
 
 # 固定随机数种子
 def set_seed(seed=42):
@@ -29,8 +30,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--trainset_path", type=str, 
         default='../Datasets/RGB-DSOD/RGBD_Train/')
 parser.add_argument("--testset_path", type=str, 
-        default='../Datasets/RGB-DSOD/RGB-DSOD/DUT-RGBD-Test/')
-       # RGBD Dataset: [DUT-RGBD-Test, NJUD, NLPR, SIP, STERE]
+        default='../Datasets/RGB-DSOD/DUT-RGBD-Test/')
+       # RGBD Dataset: [DUT-RGBD-Test, LFSD, NJUD, NLPR, SIP, SSD, STERE]
 parser.add_argument("--dataset", type=str, default='RGBDSOD', 
                     help='Name of dataset:[RGBDSOD]')
 parser.add_argument('--model', type=str, default='TAGNet', 
@@ -52,7 +53,7 @@ parser.add_argument('--save_ep', type=int, default=5, help='save checkpoint ever
 opt = parser.parse_args()
 
 
-def validate(opts, model, loader, device, metrics):
+def validate(opts, model, text_encoder, loader, device, metrics):
     metrics.reset()
     with torch.no_grad():
         for step, (images, depths, texts, labels) in tqdm(enumerate(loader)):
@@ -61,8 +62,8 @@ def validate(opts, model, loader, device, metrics):
             depths = depths.to(device, dtype=torch.float32)
             labels = labels.to(device, dtype=torch.float32)
 
-            # TagNet推理时输入：rgb, depth, texts；输出：含sal_map的字典
-            outputs = model(images, depths, texts)
+            texts_feat = text_encoder(texts).float()
+            outputs = model(images, depths, texts_feat)
             sal_map = outputs['sal_map']  # 获取显著性图（已通过Sigmoid归一化）
 
             # 特征维度压缩（适配metrics计算）
@@ -76,19 +77,23 @@ def validate(opts, model, loader, device, metrics):
 
 
 if __name__=='__main__':
+    # 1. 文件夹创建与TensorBoard初始化
     if not os.path.exists(opt.save_path):
         os.makedirs(opt.save_path)
     opt.log_dir = opt.log_dir + f'{opt.model}_{opt.convnext_model}_{opt.dataset}_ep{opt.epoch}_lr{str(opt.lr)}'
     tb_writer = SummaryWriter(opt.log_dir)
-    opt.model +="_"+opt.convnext_model.split('_')[1]
+    
     print(f"[Config] {opt}")
 
-    model = TAGNet(convnext_model_name=opt.convnext_model).to(device)
+    model = eval(opt.model)(convnext_model_name=opt.convnext_model).to(device)
+    text_encoder =  CLIPTextEncoder("ViT-B/16")
+    text_encoder.eval()
+    
     print(f"[Model] Loaded TagNet with backbone: {opt.convnext_model}")
-
+    opt.model +="_"+opt.convnext_model.split('_')[1]
+    
     if opt.load and os.path.isfile(opt.load):
         checkpoint = torch.load(opt.load, map_location=device)
-        # 若 checkpoint 是字典（含model_state_dict），则取value；否则直接加载
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'])
         else:
@@ -103,7 +108,7 @@ if __name__=='__main__':
         opt.trainset_path+'train_images/',
         opt.trainset_path+'train_depth/', 
         opt.trainset_path+'train_masks/', 
-        opt.trainset_path+'train_text/',  # 文本路径（输出list[str]）
+        opt.trainset_path+'train_text/',  
         batchsize=opt.batchsize,
         trainsize=opt.trainsize,
         num_workers=opt.n_cpu
@@ -130,25 +135,29 @@ if __name__=='__main__':
         data_loader = tqdm(train_loader, file=sys.stdout)
 
         for i, (images, depths, texts, gts) in enumerate(data_loader, start=1):
+            # 数据设备迁移（texts是list[str]，禁止转CUDA！）
             images = images.to(device)
             depths = depths.to(device)
             gts = gts.to(device)
 
-            outputs = model(images, depths, texts, gts)
-            total_loss = outputs['losses']['total_loss'] 
+            texts_feat = text_encoder(texts).float()
+            outputs = model(images, depths, texts_feat, gts)
+            total_loss = outputs['losses']['total_loss']  # 直接使用模型内部计算的总损失
 
+            # 反向传播与优化
             optimizer.zero_grad()
             total_loss.backward()
-            clip_gradient(optimizer, opt.clip) 
+            clip_gradient(optimizer, opt.clip)  # 梯度裁剪防爆炸
             optimizer.step()
 
             running_total_loss += total_loss.item()
+      
             current_lr = optimizer.param_groups[0]["lr"]
             data_loader.desc = f"Epoch {epoch+1}/{opt.epoch}, LR: {current_lr:.6f}, Loss: {running_total_loss/i:.4f}"
 
         print(f"[Val] Epoch {epoch+1} validation...")
         model.eval()
-        val_score = validate(opts=opt, model=model, loader=val_loader, device=device, metrics=metrics)
+        val_score = validate(opts=opt, model=model, text_encoder=text_encoder, loader=val_loader, device=device, metrics=metrics)
         print(f"[Val] Epoch {epoch+1}, MAE: {val_score['MAE']:.4f}, Sm: {val_score['Sm']:.4f}")
 
         tags = ["train_loss", "learning_rate", "MAE", "Sm",]
@@ -159,8 +168,9 @@ if __name__=='__main__':
 
 
         if (epoch+1) % opt.save_ep == 0:
+            # 保存最新权重和间隔权重
             torch.save(model.state_dict(), opt.save_path + f'latest_{opt.model}_{opt.dataset}.pth')
-            if (epoch+1) % 25 == 0:
+            if (epoch+1)>=60 and (epoch+1) % 20 == 0:
                 torch.save(model.state_dict(), opt.save_path + f'{opt.model}_{opt.dataset}_{epoch+1}e.pth')
             print(f"Model Saved at {opt.save_path}")
 
