@@ -4,27 +4,31 @@ from PIL import Image
 import numpy as np
 import os, argparse
 import imageio
-from network.TAGNet import TAGNet
+from network.TAGNet import TAGNet, CLIPTextEncoder
 from setting.VLdataLoader import test_dataset
 from tqdm import tqdm
 import time
 import cv2
 
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 parser = argparse.ArgumentParser()
 parser.add_argument("--test_path", type=str, 
-        default='../Datasets/RGB-DSOD/RGB-DSOD/', 
+        default='../Datasets/RGB-DSOD/', 
         help='Name of dataset')
 parser.add_argument('--testsize', type=int, default=256, help='testing size')
 parser.add_argument("--model", type=str, default='TAGNet',
         help='model name:[TAGNet]')
 parser.add_argument('--convnext_model', type=str, default='convnext_base', 
-                    help='ConvNext backbone: [convnext_base]')
-parser.add_argument("--smap_save", type=str, default='../Sal_Preds/', help='save_path name')
+                    help='ConvNext backbone: [convnext_tiny, convnext_small, convnext_base]')
+parser.add_argument("--smap_save", type=str, default='../Sal_Pred/',
+        help='model name')
 parser.add_argument("--load", type=str,
             default="",
               help="restore from checkpoint")
+
 opt = parser.parse_args()
+
 
 def create_folder(save_path):
     import os
@@ -33,7 +37,10 @@ def create_folder(save_path):
         print(f"Create Folder [“{save_path}”].")
     return save_path
 
+
 model = eval(opt.model)(convnext_model_name=opt.convnext_model)
+text_encoder =  CLIPTextEncoder("ViT-B/16")
+text_encoder.eval()
 
 if opt.load is not None and os.path.isfile(opt.load):
     checkpoint = torch.load(opt.load, map_location=torch.device('cpu'))
@@ -44,7 +51,19 @@ if opt.load is not None and os.path.isfile(opt.load):
 model.cuda()
 model.eval()
 
+
 test_datasets = ['DUT-RGBD-Test', 'NJUD', 'NLPR', 'SIP', 'STERE']
+
+DATASETS = {
+    "DUT-RGBD-Test": "DUT-RGBD-Test/",
+  #  "LFSD": "LFSD/",
+    "NJUD": "NJUD/",
+    "NLPR": "NLPR/",
+    "SIP": "SIP/",
+   # "SSD": "SSD/",
+    "STERE": "STERE/"
+}
+
 
 for dataset in test_datasets:
     # load data
@@ -68,15 +87,22 @@ for dataset in test_datasets:
             image = image.cuda()
             depth = depth.cuda()
             start_time = time.perf_counter()
-            outputs = model(image, depth, text)
+            text_feat = text_encoder(text).float()
+            outputs = model(image, depth, text_feat)
             res = outputs['sal_map']
             cost_time.append(time.perf_counter() - start_time)
             # res = F.upsample(res, size=gt.shape, mode='bilinear', align_corners=False)
             res = res.data.cpu().numpy().squeeze()
             res = (res - res.min()) / (res.max() - res.min() + 1e-8)
             cv2.imwrite(save_path+name, res*255)
+            # im = Image.fromarray(res*255).convert('RGB')
 
+            # p8 = im.convert("P")  # 将24位深的RGB图像转化为8位深的模式“P”图像
+            # p8.save(save_path+name)
+            
     cost_time.pop(0)
     print('Mean running time is: ', np.mean(cost_time))
     print("FPS is: ", test_loader.size / np.sum(cost_time))
 print("Test Done!")
+
+
