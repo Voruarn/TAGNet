@@ -1,9 +1,11 @@
 import torch
-from network.TAGNet import TAGNet
+from network.TAGNet import TAGNet, CLIPTextEncoder
 
 def test_model():
     torch.manual_seed(42)
-    model = TAGNet(convnext_model_name='convnext_base')
+    model = TAGNet()
+    text_encoder =  CLIPTextEncoder("ViT-B/16")
+    text_encoder.eval()
     
     batch_size = 2
     height, width = 256, 256  
@@ -30,13 +32,15 @@ def test_model():
         target_cuda = target.cuda()
 
         model.train()
-        outputs_cuda = model(rgb_cuda, depth_cuda, texts, target_cuda)
+        texts_feat = text_encoder(texts).float()
+       # outputs = model(images, depths, texts_feat, gts)
+        outputs_cuda = model(rgb_cuda, depth_cuda, texts_feat, target_cuda)
         print("\n=== CUDA训练模式测试 ===")
         print(f"CUDA总损失: {outputs_cuda['losses']['total_loss'].item():.6f}")
         
         model.eval()
         with torch.no_grad():
-            outputs_cuda = model(rgb_cuda, depth_cuda, texts)
+            outputs_cuda = model(rgb_cuda, depth_cuda, texts_feat)
         print("=== CUDA推理模式测试 ===")
         print(f"CUDA推理输出形状: {outputs_cuda['sal_map'].shape}")
 
