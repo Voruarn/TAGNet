@@ -106,60 +106,81 @@ class MLP(nn.Module):
 
         return x
 
-
 class VisualTextAttention(nn.Module):
-    """视觉-文本交叉注意力模块（对应图c）- 修复维度不匹配问题"""
-    def __init__(self, visual_dim, text_dim,):
+    def __init__(self, visual_dim, text_dim, dropout=0.1):
         super().__init__()
         self.visual_dim = visual_dim
         self.text_dim = text_dim
         
-        # 新增：文本特征维度投影层（text_dim→visual_dim）
         self.text_proj = nn.Linear(text_dim, visual_dim)
-        # Cross-Attention组件（embed_dim=visual_dim，与投影后文本维度一致）
-        self.cross_attn = nn.MultiheadAttention(visual_dim, num_heads=8, batch_first=True)
-        
-        # 后续变换层：Linear→ReLU→Linear→Tanh
+        self.cross_attn = nn.MultiheadAttention(visual_dim, num_heads=4, batch_first=True) 
+        self.ffn = MLP(visual_dim)
+
         self.linear1 = nn.Linear(visual_dim, visual_dim)
         self.relu = nn.ReLU()
         self.linear2 = nn.Linear(visual_dim, visual_dim)
         self.tanh = nn.Tanh()
 
-        # 初始化（包含新增的text_proj）
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                nn.init.constant_(m.bias, 0)
+                if m.bias is not None:  # 增加bias存在性判断
+                    nn.init.constant_(m.bias, 0)
     
     def forward(self, visual_feat, text_feat):
-        """
-        visual_feat: (B, H, W, visual_dim) - 带空间维度的视觉特征（4D）
-        text_feat: (B, text_dim) - 文本特征
-        """
-        # 1. 保存视觉特征的空间维度信息（用于后续恢复形状）
+
         B, C, H, W = visual_feat.shape 
-        visual_feat=visual_feat.permute(0, 2, 3, 1)  # 获取 B, H, W, C
-        visual_feat_flat = visual_feat.reshape(B, H*W, C)  # 展平空间维度
+        visual_feat = visual_feat.permute(0, 2, 3, 1)  # (B, C, H, W) → (B, H, W, C)
+        visual_feat_flat = visual_feat.reshape(B, H*W, C)  # 展平空间维度：(B, H*W, C)
         
-        # 3. 文本特征投影与扩展（保持不变）
-        text_feat_proj = self.text_proj(text_feat)  # (B, visual_dim)
-        text_feat_expand = text_feat_proj.unsqueeze(1)  # (B, 1, visual_dim)
+        text_feat_proj = self.text_proj(text_feat)  # (B, text_dim) → (B, visual_dim)
+        text_feat_expand = text_feat_proj.unsqueeze(1)  # (B, visual_dim) → (B, 1, visual_dim)
         
-        # 4. Cross-Attention：输入为3D张量（已展平）
         attn_out, _ = self.cross_attn(visual_feat_flat, text_feat_expand, text_feat_expand)  # (B, H*W, C)
         
-        # 5. 后续变换（保持不变）
         linear_out = self.linear1(attn_out)
         linear_out = self.relu(linear_out)
         linear_out = self.linear2(linear_out)
         linear_out = self.tanh(linear_out)
         
-        # 6. 残差连接（使用展平的视觉特征）
         out = attn_out * linear_out
         out = out + visual_feat_flat  # (B, H*W, C)
-
-        out = out.reshape(B, H, W, C)  # 恢复空间维度, 将3D序列恢复为4D空间特征 [B, H, W, C]
-        out = out.permute(0, 3, 1, 2) # B, C, H, W
+        
+        out_4d = out.reshape(B, H, W, C)  # (B, H*W, C) → (B, H, W, C)
+        out_mlp = self.ffn(out_4d)         # MLP处理4维特征
+        out = out_mlp.reshape(B, H*W, C)   # 重新展平为3D序列
+        
+        out = out.reshape(B, H, W, C)      # (B, H*W, C) → (B, H, W, C)
+        out = out.permute(0, 3, 1, 2)      # (B, H, W, C) → (B, C, H, W)
 
         return out
 
+class ModalEnhancedFusion(nn.Module):
+    def __init__(self, dim=512):
+        super().__init__()
+
+        self.depth2rgb_gate = nn.Sequential(
+            nn.Conv2d(dim, dim, 1),
+            nn.Sigmoid() 
+        )
+        
+        self.rgb2depth_gate = nn.Sequential(
+            nn.Conv2d(dim, dim, 1),
+            nn.Sigmoid()
+        )
+        
+        self.fusion_conv = nn.Conv2d(dim * 2, dim, 3, padding=1)
+    
+    def forward(self, rgb_feat, depth_feat):
+        rgb_gate = self.depth2rgb_gate(depth_feat)
+        rgb_enhanced = rgb_feat * (1 + rgb_gate)  
+        
+        depth_gate = self.rgb2depth_gate(rgb_feat)
+        depth_enhanced = depth_feat * (1 + depth_gate)  
+        
+        fused_feat = torch.cat([rgb_enhanced, depth_enhanced], dim=1)
+        fused_feat = self.fusion_conv(fused_feat)
+        
+        fused_feat = fused_feat + rgb_feat + depth_feat
+        
+        return fused_feat
